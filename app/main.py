@@ -99,8 +99,8 @@ def predict(payload: Union[SingleInput, BatchInput]):
         items = payload.features if isinstance(payload, SingleInput) else payload.items
         if not items:
             raise ValueError("No data provided")
-
-        df = pd.DataFrame(items)
+        
+        df = pd.DataFrame([items] if isinstance(payload, SingleInput) else items)
 
         # 自動補齊缺失欄位 + 嚴格順序
         for col in original_features:
