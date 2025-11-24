@@ -6,13 +6,13 @@ import joblib
 import pandas as pd
 from pathlib import Path
 
-# 載入模型
+# Load model
 bundle = joblib.load(Path("app/model.joblib"))
 pipeline = bundle["pipeline"]
 features_used = bundle["features_used"]
 target = bundle["target"]
 
-# 載入 meta
+# load meta
 import json
 with open("app/model_meta.json") as f:
     meta = json.load(f)

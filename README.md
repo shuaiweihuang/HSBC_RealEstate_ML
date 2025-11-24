@@ -9,7 +9,6 @@ A minimal FastAPI service that serves a scikit-learn regression pipeline for pre
 - `/health` – simple health check endpoint
 - Interactive documentation:  
   - Swagger UI → `/docs`  
-  - ReDoc → `/redoc`
 
 ## Requirements
 - Python 3.12+

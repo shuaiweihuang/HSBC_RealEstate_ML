@@ -1,7 +1,10 @@
-# hpml_train.py
 """
 House Price ML – Train a clean, production-ready regression model
-Only uses meaningful business features (id columns are automatically dropped)
+
+Strictly prevents data leakage by:
+- Hard-coded allow-list of business-meaningful features only
+- Automatic detection and removal of ID-like columns
+- No train-test contamination
 
 Allowed features:
     square_footage, bedrooms, bathrooms, year_built,
@@ -11,6 +14,7 @@ Allowed features:
 import argparse
 import json
 from pathlib import Path
+from typing import Optional
 
 import joblib
 import numpy as np
@@ -22,6 +26,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 
+# Business-approved feature allow-list (prevents ID leakage)
 ALLOWED_FEATURES = {
     "square_footage",
     "bedrooms",
@@ -37,13 +42,22 @@ def hpml_train(
     data_path: Path,
     model_path: Path,
     meta_path: Path,
-    target_name: str | None = None,
+    target_name: Optional[str] = None,
 ) -> None:
-    # 1. Load data
+    """
+    Train a leakage-free Ridge regression model on housing data.
+
+    Args:
+        data_path: Path to training CSV
+        model_path: Where to save the trained joblib bundle
+        meta_path: Where to save training metadata and coefficients
+        target_name: Optional override for target column name
+    """
+    # 1. Load dataset
     df = pd.read_csv(data_path)
 
     if df.shape[0] < 10:
-        raise ValueError("Dataset too small – need at least 10 rows.")
+        raise ValueError("Dataset must contain at least 10 samples for training.")
 
     # 2. Auto-detect target column
     if target_name and target_name in df.columns:
@@ -53,34 +67,38 @@ def hpml_train(
     elif "sale_price" in df.columns:
         target = "sale_price"
     else:
-        target = df.columns[-1]  # last resort
+        target = df.columns[-1]  # fallback
+        print(f"[Info] Target column not found, using last column as target: '{target}'")
 
     y = df[target].astype(float)
 
-    # 3. 嚴格篩選特徵：只保留 ALLOWED_FEATURES 中實際存在的欄位
+    # 3. Select only allowed business features that exist in data
     available_features = [col for col in ALLOWED_FEATURES if col in df.columns]
     missing_features = ALLOWED_FEATURES - set(available_features)
 
     if missing_features:
-        print(f"[Warning] These requested features are missing in data: {missing_features}")
+        print(f"[Warning] Missing requested features (will be ignored): {missing_features}")
 
     if not available_features:
         raise ValueError("No allowed features found in dataset!")
 
     X_raw = df[available_features].copy()
 
-    # 4. 再次確認沒有偷偷把 id 之類的欄位混進來（雙重保險）
-    forbidden_patterns = {"id", "index", "row", "listing"}
-    leaked = [c for c in X_raw.columns if any(p in c.lower() for p in forbidden_patterns)]
+    # 4. Double-safety: drop any column that smells like an ID (defense in depth)
+    forbidden_patterns = {"id", "index", "row", "listing", "mls"}
+    leaked = [
+        col for col in X_raw.columns
+        if any(pattern in col.lower() for pattern in forbidden_patterns)
+    ]
     if leaked:
-        print(f"[Warning] Detected and auto-dropped forbidden columns: {leaked}")
+        print(f"[Security] Auto-dropping forbidden ID-like columns: {leaked}")
         X_raw = X_raw.drop(columns=leaked)
 
-    # 5. 分離數值與類別欄位（目前這 7 個全是 numeric，但保留彈性）
+    # 5. Separate numeric and categorical columns (all numeric now, but future-proof)
     numeric_cols = X_raw.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = X_raw.select_dtypes(exclude=[np.number]).columns.tolist()
 
-    # 6. Preprocessing
+    # 6. Build preprocessing pipeline
     numeric_transformer = Pipeline(steps=[("scaler", StandardScaler())])
 
     categorical_transformer = Pipeline(steps=[
@@ -92,16 +110,16 @@ def hpml_train(
             ("num", numeric_transformer, numeric_cols),
             ("cat", categorical_transformer, categorical_cols),
         ],
-        sparse_threshold=0,
+        sparse_threshold=0,  # Always return dense array
     )
 
-    # 7. Final pipeline
+    # 7. Final training pipeline
     pipeline = Pipeline(steps=[
         ("preprocessor", preprocessor),
-        ("model", Ridge(alpha=1.0)),
+        ("model", Ridge(alpha=1.0, random_state=42)),
     ])
 
-    # 8. Train & evaluate on training set (for reporting)
+    # 8. Train and evaluate on full training set (for reporting & explainability)
     pipeline.fit(X_raw, y)
     preds = pipeline.predict(X_raw)
 
@@ -110,7 +128,7 @@ def hpml_train(
     train_mean_price = float(y.mean())
     naive_mae = float(mean_absolute_error(y, np.full_like(y, train_mean_price)))
 
-    # 9. Extract coefficients (very useful for business explanation)
+    # 9. Extract feature coefficients for business interpretability
     coef_map = {}
     intercept = None
     try:
@@ -121,18 +139,18 @@ def hpml_train(
         for name, coef in zip(feature_names, coefs):
             coef_map[name] = float(coef)
 
-        # Print top 10 most important features
+        # Show top 10 most impactful features
         top10 = sorted(coef_map.items(), key=lambda x: abs(x[1]), reverse=True)[:10]
-        print("\nTop 10 feature coefficients:")
+        print("\nTop 10 feature coefficients (absolute impact):")
         for name, coef in top10:
-            print(f"   {name}: {coef:+.2f}")
+            print(f"   {name:<35}: {coef:+8.2f}")
     except Exception as e:
-        print(f"[Warning] Could not extract coefficients: {e}")
+        print(f"[Warning] Failed to extract coefficients: {e}")
 
-    # 10. Save model + metadata
+    # 10. Save model + rich metadata
     joblib.dump({
         "pipeline": pipeline,
-        "features_used": X_raw.columns.tolist(),   # 明確記錄實際用了哪些欄位
+        "features_used": X_raw.columns.tolist(),
         "target": target,
     }, model_path)
 
@@ -147,28 +165,58 @@ def hpml_train(
             "r2": r2,
             "rmse": float(np.sqrt(((y - preds) ** 2).mean())),
         },
-        "model": "Ridge(alpha=1.0)",
+        "model": "Ridge(alpha=1.0, random_state=42)",
         "coefficients": coef_map,
         "intercept": intercept,
+        "training_date_utc": pd.Timestamp("now", tz="UTC").isoformat(),
     }
 
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
-    # 11. Summary output
-    print(f"\nModel saved -> {model_path}")
-    print(f"Meta   saved -> {meta_path}")
-    print(f"Used features ({len(X_raw.columns)}): {list(X_raw.columns)}")
-    print(f"Training MAE : {mae:,.2f}   |   R²: {r2:.4f}")
-    print(f"Naive MAE    : {naive_mae:,.2f}   (model improvement: {naive_mae - mae:,.2f})")
+    # 11. Training summary
+    print("\n" + "="*60)
+    print("                TRAINING COMPLETED")
+    print("="*60)
+    print(f"Model saved         → {model_path}")
+    print(f"Metadata saved      → {meta_path}")
+    print(f"Features used ({len(X_raw.columns)}): {list(X_raw.columns)}")
+    print(f"Training MAE        : {mae:,.2f}")
+    print(f"R² score            : {r2:.4f}")
+    print(f"Naive baseline MAE  : {naive_mae:,.0f}")
+    print(f"Improvement         : {naive_mae - mae:,.0f} ({(naive_mae - mae)/naive_mae:.1%})")
+    print("="*60)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train clean house price model (id-safe)")
-    parser.add_argument("--data", type=Path, default="../data/HousePriceDataset.csv")
-    parser.add_argument("--model", type=Path, default="app/model.joblib")
-    parser.add_argument("--meta", type=Path, default="app/model_meta.json")
-    parser.add_argument("--target", type=str, default=None)
+    parser = argparse.ArgumentParser(
+        description="Train a leakage-free house price regression model"
+    )
+    parser.add_argument(
+        "--data",
+        type=Path,
+        default=Path("data/raw/HousePriceDataset.csv"),
+        help="Path to training dataset (CSV)"
+    )
+    parser.add_argument(
+        "--model",
+        type=Path,
+        default=Path("app/model.joblib"),
+        help="Output path for trained model"
+    )
+    parser.add_argument(
+        "--meta",
+        type=Path,
+        default=Path("app/model_meta.json"),
+        help="Output path for training metadata"
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        default=None,
+        help="Target column name (default: auto-detect 'price' or 'sale_price')"
+    )
     args = parser.parse_args()
 
     hpml_train(args.data, args.model, args.meta, args.target)
