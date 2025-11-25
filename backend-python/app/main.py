@@ -6,18 +6,21 @@ Production-ready FastAPI service with single/batch inference and CSV upload supp
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Union
 import joblib
 import json
 import os
 import pandas as pd
 from io import StringIO
+import numpy as np 
+from pathlib import Path
 
 
 # Configuration via environment variables (production-ready)
 MODEL_FILE = os.environ.get("MODEL_FILE", "model.joblib")
 META_FILE = os.environ.get("META_FILE", "model_meta.json")
+CURRENT_YEAR = 2025 # Must match the year used during training
 
 app = FastAPI(
     title="HSBC Real Estate Price Prediction API",
@@ -42,118 +45,136 @@ app.add_middleware(
 model_pipeline = None
 model_meta: Dict[str, Any] = {}
 original_features: List[str] = []
-
+target: str = "price" 
 
 @app.on_event("startup")
 def load_model() -> None:
     """Load trained model and metadata at startup."""
-    global model_pipeline, model_meta, original_features
-
-    if not os.path.exists(MODEL_FILE):
-        raise RuntimeError(f"Model file not found: {MODEL_FILE}")
-
-    # Load model bundle
-    bundle = joblib.load(MODEL_FILE)
-    model_pipeline = bundle.get("pipeline") or bundle
-    original_features = bundle.get("features_used") or bundle.get("features", [])
-
-    # Load metadata
-    if os.path.exists(META_FILE):
-        with open(META_FILE, "r", encoding="utf-8") as f:
+    global model_pipeline, model_meta, original_features, target
+    
+    try:
+        # Load model bundle
+        bundle = joblib.load(Path(MODEL_FILE))
+        model_pipeline = bundle["pipeline"]
+        original_features = bundle["features_used"]
+        target = bundle["target"]
+        
+        # Load meta
+        with open(META_FILE, encoding="utf-8") as f:
             model_meta = json.load(f)
-    else:
-        model_meta = {
-            "target": "price",
-            "n_samples": 0,
-            "features_used": original_features,
-        }
+            
+        print(f"Model and metadata loaded successfully. Features: {original_features}")
 
-    print(f"Model loaded successfully | Features: {len(original_features)} → {original_features}")
+    except Exception as e:
+        print(f"Error loading model or metadata: {e}")
+        model_pipeline = None
 
 
-# === Pydantic Schemas ===
-class SingleInput(BaseModel):
-    features: Dict[str, Any]
+class HouseFeatures(BaseModel):
+    square_footage: float = Field(..., example=1850)
+    bedrooms: int = Field(..., ge=1, le=10, example=3)
+    bathrooms: float = Field(..., ge=1, le=10, example=2)
+    # Receive year_built from the user
+    year_built: int = Field(..., ge=1900, le=CURRENT_YEAR, example=2000) 
+    lot_size: float = Field(..., example=7500)
+    distance_to_city_center: float = Field(..., example=5.5)
+    school_rating: float = Field(..., ge=0, le=10, example=8.2)
 
 
-class BatchInput(BaseModel):
-    items: List[Dict[str, Any]]
+class PredictionResponse(BaseModel):
+    predicted_price: int
 
 
-class PredictResponse(BaseModel):
-    predictions: List[float]
+class BatchPredictionResponse(BaseModel):
+    predictions: List[PredictionResponse]
 
 
-# === Health & Model Info ===
+def preprocess_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Performs feature engineering: converts 'year_built' to 'age_of_house',
+    and ensures the output DataFrame columns match the features the model expects.
+    """
+    if "year_built" in df.columns:
+        # 1. Convert to age of house
+        df["age_of_house"] = CURRENT_YEAR - df["year_built"]
+        
+        # 2. Remove year_built (which the model does not expect)
+        df = df.drop(columns=["year_built"], errors='ignore')
+        
+    # 3. Ensure column order and presence match the model's expected features
+    # Note: original_features now contains 'age_of_house' and not 'year_built'
+    
+    # Simple check for missing columns (shouldn't happen with Pydantic for single/batch, but good for CSV)
+    missing_cols = set(original_features) - set(df.columns)
+    for col in missing_cols:
+        # This part should be handled carefully, assuming inputs provide all needed features
+        df[col] = np.nan 
+        
+    return df[original_features]
+
+
 @app.get("/health", tags=["health"])
-def health_check() -> Dict[str, str]:
-    """Health check endpoint."""
-    return {"status": "healthy", "message": "Model is loaded and ready"}
+async def health_check():
+    return {"status": "healthy", "model": "loaded" if model_pipeline else "not loaded"}
 
 
 @app.get("/model-info", tags=["model"])
-def model_information() -> Dict[str, Any]:
-    """Return model metadata, performance metrics, and top feature impacts."""
+async def model_info():
     if not model_meta:
-        raise HTTPException(status_code=503, detail="Model metadata not available")
+        raise HTTPException(status_code=503, detail="Model metadata not loaded")
 
-    coefficients = model_meta.get("coefficients", {})
-    top5 = sorted(coefficients.items(), key=lambda x: abs(x[1]), reverse=True)[:5]
-
+    # Extract test set metrics for a more honest assessment
+    test_metrics = model_meta.get("metrics_on_test_set", {})
+    
     return {
-        "target": model_meta.get("target", "price"),
+        "target": target,
         "features_used": original_features,
-        "training_samples": model_meta.get("n_samples", "unknown"),
-        "train_mae": round(model_meta.get("metrics_on_training_set", {}).get("mae", 0)),
-        "train_r2": round(model_meta.get("metrics_on_training_set", {}).get("r2", 0), 4),
-        "top5_impact_features": [
-            {
-                "feature": name.replace("num__", "").replace("cat__", ""),
-                "impact": round(coef)
-            }
-            for name, coef in top5
-        ],
-        "full_coefficients": {
-            k.replace("num__", "").replace("cat__", ""): round(v, 2)
-            for k, v in coefficients.items()
-        },
-        "intercept": round(model_meta.get("intercept", 0), 2) if model_meta.get("intercept") else None,
+        "n_samples": model_meta["n_samples"],
+        "train_samples": model_meta.get("train_samples"),
+        "test_samples": model_meta.get("test_samples"),
+        "train_mae": round(model_meta["metrics_on_training_set"]["mae"]),
+        "test_mae": round(test_metrics.get("mae", -1)),
+        "train_r2": round(model_meta["metrics_on_training_set"]["r2"], 4),
+        "test_r2": round(test_metrics.get("r2", -1), 4),
+        "coefficients": {k: round(v, 2) for k, v in model_meta["coefficients"].items()},
+        "top_features": [
+            {"feature": name.replace("num__", ""), "impact": round(coef)}
+            for name, coef in sorted(model_meta["coefficients"].items(), key=lambda x: abs(x[1]), reverse=True)[:5]
+        ]
     }
 
 
-# === Inference Endpoints ===
-@app.post("/predict", response_model=PredictResponse, tags=["inference"])
-def predict(payload: Union[SingleInput, BatchInput]):
-    """
-    Predict house prices for single or multiple records.
-    Supports both single object and batch array input.
-    """
+@app.post("/predict", response_model=PredictionResponse, tags=["inference"])
+async def predict_single(house: HouseFeatures):
+    if model_pipeline is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+        
+    # 1. Convert to DataFrame
+    df = pd.DataFrame([house.dict()])
+    
+    # 2. Feature Engineering: Convert to age of house
+    X = preprocess_features(df)
+    
+    # 3. Predict
+    pred = model_pipeline.predict(X)[0]
+    return {"predicted_price": int(np.round(pred))}
+
+
+@app.post("/predict-batch", response_model=BatchPredictionResponse, tags=["inference"])
+async def predict_batch(houses: List[HouseFeatures]):
     if model_pipeline is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    try:
-        # Normalize input: always work with list of records (fixes pandas scalar issue)
-        if isinstance(payload, SingleInput):
-            records = [payload.features]
-        else:
-            records = payload.items
-
-        if not records:
-            raise ValueError("No prediction data provided")
-
-        df = pd.DataFrame(records)
-
-        # Ensure feature completeness and order
-        for col in original_features:
-            if col not in df.columns:
-                df[col] = 0
-        df = df[original_features]
-
-        predictions = model_pipeline.predict(df)
-        return {"predictions": [float(round(p)) for p in predictions]}
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Prediction failed: {str(e)}")
+    # 1. Convert to DataFrame
+    df = pd.DataFrame([h.dict() for h in houses])
+    
+    # 2. Feature Engineering: Convert to age of house
+    X = preprocess_features(df)
+    
+    # 3. Predict
+    predictions = model_pipeline.predict(X)
+    
+    return {"predictions": [{"predicted_price": int(np.round(p))} for p in predictions]}
 
 
 @app.post("/predict-csv", tags=["inference"])
@@ -175,15 +196,21 @@ async def predict_csv(file: UploadFile = File(...)):
         if df.empty:
             raise ValueError("Uploaded CSV is empty")
 
-        # Align with training features
-        for col in original_features:
-            if col not in df.columns:
-                df[col] = 0
-        df = df[original_features]
+        # 1. Feature Engineering: Convert to age of house and align columns
+        # We pass a copy to preprocess_features to avoid modifying the original df 
+        # before the result_df copy.
+        X = preprocess_features(df.copy()) 
 
-        predictions = model_pipeline.predict(df)
+        # 2. Predict
+        predictions = model_pipeline.predict(X)
+        
+        # 3. Prepare result DataFrame (use original df features, but add predicted price)
         result_df = df.copy()
-        result_df.insert(0, "id", range(1, len(result_df) + 1))
+        
+        if 'id' not in result_df.columns:
+            # Insert ID if not present
+            result_df.insert(0, "id", range(1, len(result_df) + 1))
+            
         result_df["predicted_price"] = predictions.astype(int)
 
         output_csv = result_df.to_csv(index=False, encoding="utf-8-sig")
@@ -197,4 +224,4 @@ async def predict_csv(file: UploadFile = File(...)):
         )
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"CSV processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")

@@ -15,6 +15,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Optional
+import datetime # Added: Import the datetime module
 
 import joblib
 import numpy as np
@@ -22,6 +23,7 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.model_selection import train_test_split # Added: for dataset splitting
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
@@ -36,6 +38,9 @@ ALLOWED_FEATURES = {
     "distance_to_city_center",
     "school_rating",
 }
+
+# Get the current year dynamically from the system time
+CURRENT_YEAR = datetime.datetime.now().year # Changed: Dynamically set current year
 
 
 def hpml_train(
@@ -55,123 +60,100 @@ def hpml_train(
     """
     # 1. Load dataset
     df = pd.read_csv(data_path)
+    
+    # === Feature Engineering: Convert to Age of House ===
+    # CURRENT_YEAR is now dynamically set above
+    df["age_of_house"] = CURRENT_YEAR - df["year_built"]
+    
+    # Determine features to use
+    target = target_name or "price"
+    # Remove "year_built" and add "age_of_house" to the allowed list
+    ALLOWED_FEATURES_TRAIN = ALLOWED_FEATURES.union({"age_of_house"}) - {"year_built"}
+    
+    # Select only allowed features
+    X_raw = df[list(ALLOWED_FEATURES_TRAIN)].copy()
+    y = df[target]
 
-    if df.shape[0] < 10:
-        raise ValueError("Dataset must contain at least 10 samples for training.")
-
-    # 2. Auto-detect target column
-    if target_name and target_name in df.columns:
-        target = target_name
-    elif "price" in df.columns:
-        target = "price"
-    elif "sale_price" in df.columns:
-        target = "sale_price"
-    else:
-        target = df.columns[-1]  # fallback
-        print(f"[Info] Target column not found, using last column as target: '{target}'")
-
-    y = df[target].astype(float)
-
-    # 3. Select only allowed business features that exist in data
-    available_features = [col for col in ALLOWED_FEATURES if col in df.columns]
-    missing_features = ALLOWED_FEATURES - set(available_features)
-
-    if missing_features:
-        print(f"[Warning] Missing requested features (will be ignored): {missing_features}")
-
-    if not available_features:
-        raise ValueError("No allowed features found in dataset!")
-
-    X_raw = df[available_features].copy()
-
-    # 4. Double-safety: drop any column that smells like an ID (defense in depth)
-    forbidden_patterns = {"id", "index", "row", "listing", "mls"}
-    leaked = [
-        col for col in X_raw.columns
-        if any(pattern in col.lower() for pattern in forbidden_patterns)
-    ]
-    if leaked:
-        print(f"[Security] Auto-dropping forbidden ID-like columns: {leaked}")
-        X_raw = X_raw.drop(columns=leaked)
-
-    # 5. Separate numeric and categorical columns (all numeric now, but future-proof)
-    numeric_cols = X_raw.select_dtypes(include=[np.number]).columns.tolist()
-    categorical_cols = X_raw.select_dtypes(exclude=[np.number]).columns.tolist()
-
-    # 6. Build preprocessing pipeline
-    numeric_transformer = Pipeline(steps=[("scaler", StandardScaler())])
-
-    categorical_transformer = Pipeline(steps=[
-        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
-    ])
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", numeric_transformer, numeric_cols),
-            ("cat", categorical_transformer, categorical_cols),
-        ],
-        sparse_threshold=0,  # Always return dense array
+    # === Data Split: Train/Test Separation (80/20) ===
+    # Split the dataset into training and testing sets
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_raw, y, test_size=0.2, random_state=42
     )
 
-    # 7. Final training pipeline
-    pipeline = Pipeline(steps=[
-        ("preprocessor", preprocessor),
-        ("model", Ridge(alpha=1.0, random_state=42)),
-    ])
+    # 2. Preprocessing Pipeline Definition
+    # Features that need scaling (all numerical features used)
+    features_to_scale = list(ALLOWED_FEATURES_TRAIN) 
+    
+    # Categorical features (none currently, but structure is preserved)
+    # categorical_features = []
 
-    # 8. Train and evaluate on full training set (for reporting & explainability)
-    pipeline.fit(X_raw, y)
-    preds = pipeline.predict(X_raw)
+    # 3. ColumnTransformer (Preprocessing Steps)
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', StandardScaler(), features_to_scale),
+            # ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
+        ],
+        remainder='drop'  # Drop features not in the list
+    )
 
-    mae = float(mean_absolute_error(y, preds))
-    r2 = float(r2_score(y, preds))
-    train_mean_price = float(y.mean())
-    naive_mae = float(mean_absolute_error(y, np.full_like(y, train_mean_price)))
+    # 4. Full Pipeline (Preprocessing + Model)
+    model = Ridge(alpha=1.0, random_state=42)
+    pipeline = Pipeline(steps=[('preprocessor', preprocessor), ('regressor', model)])
 
-    # 9. Extract feature coefficients for business interpretability
-    coef_map = {}
-    intercept = None
-    try:
-        feature_names = pipeline.named_steps["preprocessor"].get_feature_names_out()
-        coefs = pipeline.named_steps["model"].coef_
-        intercept = float(pipeline.named_steps["model"].intercept_)
+    # 5. Train the model
+    print("Starting model training...")
+    pipeline.fit(X_train, y_train) # Fit only on the training set
 
-        for name, coef in zip(feature_names, coefs):
-            coef_map[name] = float(coef)
+    # 6. Evaluate on Train and Test sets
+    
+    # Training set evaluation
+    y_train_pred = pipeline.predict(X_train)
+    train_mae = mean_absolute_error(y_train, y_train_pred)
+    train_r2 = r2_score(y_train, y_train_pred)
 
-        # Show top 10 most impactful features
-        top10 = sorted(coef_map.items(), key=lambda x: abs(x[1]), reverse=True)[:10]
-        print("\nTop 10 feature coefficients (absolute impact):")
-        for name, coef in top10:
-            print(f"   {name:<35}: {coef:+8.2f}")
-    except Exception as e:
-        print(f"[Warning] Failed to extract coefficients: {e}")
+    # Test set evaluation (reflects model generalization ability)
+    y_test_pred = pipeline.predict(X_test)
+    test_mae = mean_absolute_error(y_test, y_test_pred)
+    test_r2 = r2_score(y_test, y_test_pred)
 
-    # 10. Save model + rich metadata
-    joblib.dump({
-        "pipeline": pipeline,
-        "features_used": X_raw.columns.tolist(),
-        "target": target,
-    }, model_path)
+    # 7. Extract Coefficients
+    scaled_feature_names = [f'num__{f}' for f in features_to_scale]
+    
+    # Extract coefficients from the fitted Ridge model
+    coefs = pipeline['regressor'].coef_
+    coefficients = dict(zip(scaled_feature_names, coefs))
 
+    # 8. Create Metadata
     meta = {
         "target": target,
-        "n_samples": int(df.shape[0]),
-        "features_used": X_raw.columns.tolist(),
-        "train_mean_price": train_mean_price,
-        "baseline_naive_mae": naive_mae,
+        "n_samples": len(X_raw),
+        "train_samples": len(X_train), # Added: Number of training samples
+        "test_samples": len(X_test),   # Added: Number of testing samples
+        "features_used": list(X_raw.columns),
+        "train_mean_price": y_train.mean(),
+        # Baseline MAE is calculated using the training mean price to predict the test set
+        "baseline_naive_mae": mean_absolute_error(y_test, [y_train.mean()] * len(y_test)), 
         "metrics_on_training_set": {
-            "mae": mae,
-            "r2": r2,
-            "rmse": float(np.sqrt(((y - preds) ** 2).mean())),
+            "mae": train_mae,
+            "r2": train_r2,
         },
-        "model": "Ridge(alpha=1.0, random_state=42)",
-        "coefficients": coef_map,
-        "intercept": intercept,
-        "training_date_utc": pd.Timestamp("now", tz="UTC").isoformat(),
+        "metrics_on_test_set": { # Added: Test set metrics
+            "mae": test_mae,
+            "r2": test_r2,
+        },
+        "model": str(model),
+        "coefficients": coefficients,
     }
 
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    # 9. Save model bundle
+    bundle = {
+        "pipeline": pipeline,
+        "features_used": list(X_raw.columns),
+        "target": target,
+    }
+    joblib.dump(bundle, model_path)
+
+    # 10. Save metadata
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
@@ -179,13 +161,16 @@ def hpml_train(
     print("\n" + "="*60)
     print("                TRAINING COMPLETED")
     print("="*60)
-    print(f"Model saved         → {model_path}")
-    print(f"Metadata saved      → {meta_path}")
+    print(f"Model saved         -> {model_path}")
+    print(f"Metadata saved      -> {meta_path}")
     print(f"Features used ({len(X_raw.columns)}): {list(X_raw.columns)}")
-    print(f"Training MAE        : {mae:,.2f}")
-    print(f"R² score            : {r2:.4f}")
-    print(f"Naive baseline MAE  : {naive_mae:,.0f}")
-    print(f"Improvement         : {naive_mae - mae:,.0f} ({(naive_mae - mae)/naive_mae:.1%})")
+    print(f"Train samples       : {len(X_train):,}")
+    print(f"Test samples        : {len(X_test):,}")
+    print(f"Training MAE        : {train_mae:,.2f}")
+    print(f"R² score (Train)    : {train_r2:.4f}")
+    print("--------------------------------------------------")
+    print(f"TESTING MAE         : {test_mae:,.2f}") # Displaying Test set MAE
+    print(f"R² score (Test)     : {test_r2:.4f}") # Displaying Test set R²
     print("="*60)
 
 
@@ -211,12 +196,5 @@ if __name__ == "__main__":
         default=Path("app/model_meta.json"),
         help="Output path for training metadata"
     )
-    parser.add_argument(
-        "--target",
-        type=str,
-        default=None,
-        help="Target column name (default: auto-detect 'price' or 'sale_price')"
-    )
     args = parser.parse_args()
-
-    hpml_train(args.data, args.model, args.meta, args.target)
+    hpml_train(args.data, args.model, args.meta)
