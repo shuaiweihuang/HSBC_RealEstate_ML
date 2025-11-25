@@ -1,0 +1,30 @@
+services:
+  ml-api:
+    build:
+      context: ./backend-python
+      dockerfile: Dockerfile
+    image: hsbc-ml-api:final 
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  java-api:
+    build:
+      context: ./backend-java
+      dockerfile: Dockerfile
+    image: hsbc-java-api:final
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  portal:
+    build:
+      context: ./frontend-portal
+      dockerfile: Dockerfile
+    image: hsbc-portal:final
+    ports:
+      - "3000:3000"
+    depends_on:
+      - ml-api
+      - java-api
+    restart: unless-stopped
