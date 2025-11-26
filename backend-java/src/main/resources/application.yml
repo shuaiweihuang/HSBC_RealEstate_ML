@@ -1,0 +1,16 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: market-analysis
+  data:
+    redis:
+      host: redis 
+      port: 6379
+  cache:
+    type: redis
+
+app:
+  data-path: data/raw/HousePriceDataset.csv
+  ml-api-url: http://ml-api:8000 # 對應 docker-compose service name

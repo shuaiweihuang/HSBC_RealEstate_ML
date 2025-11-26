@@ -11,3 +11,4 @@ public class MarketApiApplication {
         SpringApplication.run(MarketApiApplication.class, args);
     }
 }
+
