@@ -20,7 +20,7 @@ from pathlib import Path
 # Configuration via environment variables (production-ready)
 MODEL_FILE = os.environ.get("MODEL_FILE", "model.joblib")
 META_FILE = os.environ.get("META_FILE", "model_meta.json")
-CURRENT_YEAR = 2025 # Must match the year used during training
+CURRENT_YEAR = 2025  # This must match the year used during model training for consistent 'age_of_house' calculation.
 
 app = FastAPI(
     title="HSBC Real Estate Price Prediction API",
@@ -36,7 +36,6 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    #allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,7 +45,7 @@ app.add_middleware(
 model_pipeline = None
 model_meta: Dict[str, Any] = {}
 original_features: List[str] = []
-target: str = "price" 
+target: str = "price"
 
 @app.on_event("startup")
 def load_model() -> None:
@@ -75,8 +74,7 @@ class HouseFeatures(BaseModel):
     square_footage: float = Field(..., example=1850)
     bedrooms: int = Field(..., ge=1, le=10, example=3)
     bathrooms: float = Field(..., ge=1, le=10, example=2)
-    # Receive year_built from the user
-    year_built: int = Field(..., ge=1900, le=CURRENT_YEAR, example=2000) 
+    year_built: int = Field(..., ge=1900, le=CURRENT_YEAR, example=2000)
     lot_size: float = Field(..., example=7500)
     distance_to_city_center: float = Field(..., example=5.5)
     school_rating: float = Field(..., ge=0, le=10, example=8.2)
@@ -92,26 +90,52 @@ class BatchPredictionResponse(BaseModel):
 
 def preprocess_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Performs feature engineering: converts 'year_built' to 'age_of_house',
-    and ensures the output DataFrame columns match the features the model expects.
+    Performs feature engineering consistent with the training script.
+    This includes creating age, interaction, and other derived features.
+    It ensures the output DataFrame columns match exactly what the model expects.
     """
-    if "year_built" in df.columns:
-        # 1. Convert to age of house
-        df["age_of_house"] = CURRENT_YEAR - df["year_built"]
-        
-        # 2. Remove year_built (which the model does not expect)
-        df = df.drop(columns=["year_built"], errors='ignore')
-        
-    # 3. Ensure column order and presence match the model's expected features
-    # Note: original_features now contains 'age_of_house' and not 'year_built'
-    
-    # Simple check for missing columns (shouldn't happen with Pydantic for single/batch, but good for CSV)
-    missing_cols = set(original_features) - set(df.columns)
-    for col in missing_cols:
-        # This part should be handled carefully, assuming inputs provide all needed features
-        df[col] = np.nan 
-        
-    return df[original_features]
+    # Create a copy to avoid modifying the original DataFrame passed to the function
+    df_processed = df.copy()
+
+    # === Feature Engineering (must match hpml_train.py) ===
+
+    # 1. Age of house
+    if "year_built" in df_processed.columns:
+        df_processed["age_of_house"] = CURRENT_YEAR - df_processed["year_built"]
+
+    # 2. Interaction and combination features
+    if "square_footage" in df_processed.columns and "bedrooms" in df_processed.columns:
+        # Add a small epsilon to avoid division by zero if bedrooms is 0 (though Pydantic ge=1 prevents this)
+        df_processed["size_per_bedroom"] = df_processed["square_footage"] / (df_processed["bedrooms"] + 1)
+    if "bathrooms" in df_processed.columns and "bedrooms" in df_processed.columns:
+        df_processed["bathroom_bedroom_ratio"] = df_processed["bathrooms"] / (df_processed["bedrooms"] + 1)
+    if "bedrooms" in df_processed.columns and "bathrooms" in df_processed.columns:
+        df_processed["total_rooms"] = df_processed["bedrooms"] + df_processed["bathrooms"]
+    if "school_rating" in df_processed.columns and "distance_to_city_center" in df_processed.columns:
+        df_processed["quality_score"] = df_processed["school_rating"] * (1 / (df_processed["distance_to_city_center"] + 0.1))
+
+    # 3. Polynomial features
+    if "square_footage" in df_processed.columns:
+        df_processed["square_footage_sq"] = df_processed["square_footage"] ** 2
+    if "lot_size" in df_processed.columns:
+        df_processed["lot_size_sq"] = df_processed["lot_size"] ** 2
+
+    # 4. Categorical features derived from continuous ones
+    if "age_of_house" in df_processed.columns:
+        df_processed["is_new_house"] = (df_processed["age_of_house"] <= 5).astype(int)
+    if "square_footage" in df_processed.columns:
+        # Use the median from training metadata for consistency
+        # Fallback to current batch's median if not in metadata (for robustness)
+        median_size = model_meta.get("training_median_square_footage", df_processed["square_footage"].median())
+        df_processed["large_house"] = (df_processed["square_footage"] > median_size).astype(int)
+
+    # 5. Final column selection and ordering
+    # This ensures the DataFrame passed to the model has the exact columns in the exact order.
+    missing_cols = set(original_features) - set(df_processed.columns)
+    if missing_cols:
+        raise RuntimeError(f"Critical features could not be engineered during preprocessing: {missing_cols}")
+
+    return df_processed[original_features]
 
 
 @app.get("/health", tags=["health"])
@@ -124,7 +148,7 @@ async def model_info():
     if not model_meta:
         raise HTTPException(status_code=503, detail="Model metadata not loaded")
 
-    # Extract test set metrics for a more honest assessment
+    # Extract test set metrics for a more realistic assessment of model performance
     test_metrics = model_meta.get("metrics_on_test_set", {})
     
     return {
@@ -149,13 +173,13 @@ async def model_info():
 async def predict_single(house: HouseFeatures):
     if model_pipeline is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
-        
+
     # 1. Convert to DataFrame
     df = pd.DataFrame([house.dict()])
-    
-    # 2. Feature Engineering: Convert to age of house
+
+    # 2. Preprocess features to match model's training data
     X = preprocess_features(df)
-    
+
     # 3. Predict
     pred = model_pipeline.predict(X)[0]
     return {"predicted_price": int(np.round(pred))}
@@ -168,13 +192,13 @@ async def predict_batch(houses: List[HouseFeatures]):
 
     # 1. Convert to DataFrame
     df = pd.DataFrame([h.dict() for h in houses])
-    
-    # 2. Feature Engineering: Convert to age of house
+
+    # 2. Preprocess features to match model's training data
     X = preprocess_features(df)
-    
+
     # 3. Predict
     predictions = model_pipeline.predict(X)
-    
+
     return {"predictions": [{"predicted_price": int(np.round(p))} for p in predictions]}
 
 
@@ -197,19 +221,18 @@ async def predict_csv(file: UploadFile = File(...)):
         if df.empty:
             raise ValueError("Uploaded CSV is empty")
 
-        # 1. Feature Engineering: Convert to age of house and align columns
-        # We pass a copy to preprocess_features to avoid modifying the original df 
-        # before the result_df copy.
-        X = preprocess_features(df.copy()) 
+        # 1. Preprocess features to match model's training data.
+        # A copy is passed to avoid modifying the original DataFrame, which is used for the response.
+        X = preprocess_features(df.copy())
 
         # 2. Predict
         predictions = model_pipeline.predict(X)
-        
-        # 3. Prepare result DataFrame (use original df features, but add predicted price)
+
+        # 3. Prepare result DataFrame: use original data and add the prediction column
         result_df = df.copy()
-        
+
         if 'id' not in result_df.columns:
-            # Insert ID if not present
+            # Insert an ID column if it's not present for easier tracking
             result_df.insert(0, "id", range(1, len(result_df) + 1))
             
         result_df["predicted_price"] = predictions.astype(int)
