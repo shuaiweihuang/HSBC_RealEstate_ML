@@ -134,7 +134,7 @@ export default function Estimator() {
           <InputField name="bathrooms" label="Bathrooms (1-10)" placeholder="e.g., 2.5" />
           <InputField name="year_built" label="Year Built" placeholder={`e.g., ${new Date().getFullYear() - 10}`} />
           <InputField name="lot_size" label="Lot Size (sq ft)" placeholder="e.g., 8200" />
-          <InputField name="distance_to_city_center" label="Distance to City Center (km)" placeholder="e.g., 4.8" />
+          <InputField name="distance_to_city_center" label="City Center Rating (1-10)" placeholder="e.g., 4.8" />
           
           <div className="md:col-span-2">
             <InputField name="school_rating" label="School Rating (1-10)" placeholder="e.g., 8.7" />

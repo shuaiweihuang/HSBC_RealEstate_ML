@@ -18,19 +18,43 @@ CURRENT_YEAR = datetime.datetime.now().year # Changed: Dynamically set current y
 
 
 def preprocess_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Performs feature engineering: converts 'year_built' to 'age_of_house',
-    and removes 'year_built'.
-    """
+    
+    # 1. Age of house
     if "year_built" in df.columns:
-        # 1. Convert to age of house
         df["age_of_house"] = CURRENT_YEAR - df["year_built"]
+        df = df.drop(columns=["year_built"], errors='ignore') # Removed year_built here
         
-        # 2. Remove year_built
-        df = df.drop(columns=["year_built"], errors='ignore')
+    # 2. Replicate Additional Feature Engineering from hpml_train.py
+    # Interaction features
+    if "square_footage" in df.columns and "bedrooms" in df.columns:
+        df["size_per_bedroom"] = df["square_footage"] / (df["bedrooms"] + 1)
+    
+    if "bathrooms" in df.columns and "bedrooms" in df.columns:
+        df["bathroom_bedroom_ratio"] = df["bathrooms"] / (df["bedrooms"] + 1)
+    
+    # Combination features
+    if "bedrooms" in df.columns and "bathrooms" in df.columns:
+        df["total_rooms"] = df["bedrooms"] + df["bathrooms"]
+    
+    if "school_rating" in df.columns and "distance_to_city_center" in df.columns:
+        df["quality_score"] = df["school_rating"] * df["distance_to_city_center"]
+    
+    # Polynomial features
+    if "square_footage" in df.columns:
+        df["square_footage_sq"] = df["square_footage"] ** 2
+    
+    if "lot_size" in df.columns:
+        df["lot_size_sq"] = df["lot_size"] ** 2
+    
+    # Categorical features
+    if "age_of_house" in df.columns:
+        df["is_new_house"] = (df["age_of_house"] <= 5).astype(int)
+    
+    if "square_footage" in df.columns:
+        median_size = df["square_footage"].median() # NOTE: This uses the median of the PREDICTION data, which is acceptable in this case as it's not a scaling/transformation fit
+        df["large_house"] = (df["square_footage"] > median_size).astype(int)
         
     return df
-
 
 def evaluate(data_path: Path) -> None:
     """

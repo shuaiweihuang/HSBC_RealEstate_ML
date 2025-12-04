@@ -77,7 +77,7 @@ def hpml_train(
         df["total_rooms"] = df["bedrooms"] + df["bathrooms"]
     
     if "school_rating" in df.columns and "distance_to_city_center" in df.columns:
-        df["quality_score"] = df["school_rating"] * (1 / (df["distance_to_city_center"] + 0.1))
+        df["quality_score"] = df["school_rating"] * df["distance_to_city_center"]
     
     # Polynomial features
     if "square_footage" in df.columns:
