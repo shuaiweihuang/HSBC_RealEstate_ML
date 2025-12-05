@@ -74,7 +74,7 @@ public class MlApiClient {
         log.debug("Sending prediction request to ML API: {}", request);
         
         return webClient.post()
-                .uri("/predict") // ✅ 修復：使用正確的端點
+                .uri("/predict")
                 .bodyValue(request)
                 .retrieve()
                 .bodyToMono(PredictionResponse.class)
@@ -97,7 +97,7 @@ public class MlApiClient {
         log.debug("Sending batch prediction request to ML API");
         
         return webClient.post()
-                .uri("/predict")
+                .uri("/predict-batch")
                 .bodyValue(features)
                 .retrieve()
                 .bodyToMono(new ParameterizedTypeReference<Map<String, Object>>() {})

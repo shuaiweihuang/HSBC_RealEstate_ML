@@ -15,7 +15,7 @@ const schema = z.object({
   bathrooms: z.coerce.number().min(1, "Min 1 bathroom").max(10, "Max 10 bathrooms"),
   year_built: z.coerce.number().min(1900, "Min 1900").max(new Date().getFullYear(), `Max ${new Date().getFullYear()}`),
   lot_size: z.coerce.number().min(1000, "Must be at least 1000 sq ft"),
-  distance_to_city_center: z.coerce.number().min(0, "Cannot be negative"),
+  distance_to_city_center: z.coerce.number().min(1, "Min 1").max(10, "Max 10"),
   school_rating: z.coerce.number().min(1, "Min 1").max(10, "Max 10"),
 });
 
