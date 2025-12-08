@@ -68,7 +68,7 @@ public class CsvPropertyRepository implements PropertyRepository {
             try (Reader reader = new InputStreamReader(resource.getInputStream());
                  CSVReader csvReader = new CSVReader(reader)) {
 
-                // 讀取所有行，跳過標題行
+                // 讀取所有行
                 List<String[]> allRows = csvReader.readAll();
                 
                 if (allRows.isEmpty()) {
@@ -115,13 +115,6 @@ public class CsvPropertyRepository implements PropertyRepository {
     }
 
     @Override
-    public Optional<Property> findById(Long id) {
-        return cachedProperties.stream()
-                .filter(p -> p.getId() != null && p.getId().equals(id))
-                .findFirst();
-    }
-
-    @Override
     public Page<Property> findByFilters(
             Integer bedrooms,
             Double minPrice,
@@ -150,65 +143,6 @@ public class CsvPropertyRepository implements PropertyRepository {
 
         List<Property> pageContent = sorted.subList(start, end);
         return new PageImpl<>(pageContent, pageable, filtered.size());
-    }
-
-    @Override
-    public Integer getOldestYear() {
-        return cachedProperties.stream()
-                .filter(p -> p.getYearBuilt() != null)
-                .map(Property::getYearBuilt)
-                .min(Integer::compare)
-                .orElse(null);
-    }
-
-    @Override
-    public Integer getNewestYear() {
-        return cachedProperties.stream()
-                .filter(p -> p.getYearBuilt() != null)
-                .map(Property::getYearBuilt)
-                .max(Integer::compare)
-                .orElse(null);
-    }
-
-    @Override
-    public Double getAverageSquareFootage() {
-        return cachedProperties.stream()
-                .filter(p -> p.getSquareFootage() != null)
-                .mapToDouble(Property::getSquareFootage)
-                .average()
-                .orElse(0.0);
-    }
-
-    @Override
-    public Double getAveragePrice() {
-        return cachedProperties.stream()
-                .filter(p -> p.getPrice() != null)
-                .mapToDouble(Property::getPrice)
-                .average()
-                .orElse(0.0);
-    }
-
-    @Override
-    public List<Property> findByBedrooms(Integer bedrooms) {
-        return cachedProperties.stream()
-                .filter(p -> p.getBedrooms() != null && p.getBedrooms().equals(bedrooms))
-                .collect(Collectors.toList());
-    }
-
-    @Override
-    public List<Property> findByPriceRange(Double minPrice, Double maxPrice) {
-        return cachedProperties.stream()
-                .filter(p -> p.getPrice() != null)
-                .filter(p -> p.getPrice() >= minPrice && p.getPrice() <= maxPrice)
-                .collect(Collectors.toList());
-    }
-
-    @Override
-    public List<Property> findByYearRange(Integer yearFrom, Integer yearTo) {
-        return cachedProperties.stream()
-                .filter(p -> p.getYearBuilt() != null)
-                .filter(p -> p.getYearBuilt() >= yearFrom && p.getYearBuilt() <= yearTo)
-                .collect(Collectors.toList());
     }
 
     @Override
